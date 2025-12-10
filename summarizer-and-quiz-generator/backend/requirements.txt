@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+python-multipart
+pypdf
+langchain
+langchain-community
+ollama
+aiofiles
+groq

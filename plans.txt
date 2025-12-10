@@ -1,0 +1,727 @@
+PROJECT ARCHITECTURE
+
+                              ╔═══════════════╗
+                              ║     START     ║
+                              ╚═══════╤═══════╝
+                                      │
+                                      ▼
+                        ┌─────────────────────────────┐
+                        │     input_session           │
+                        │  • Load session from PG     │
+                        │  • Load chat history        │
+                        │  • Load corrections         │
+                        │  • Initialize state         │
+                        └──────────────┬──────────────┘
+                                      │
+                                      ▼
+                        ┌─────────────────────────────┐
+                        │    model_selector           │
+                        │  • Analyze query type       │
+                        │  • Select AI model          │
+                        │  • Route to service         │
+                        └──┬──────────┬───────────┬───┘
+                           │          │           │
+              ┌────────────┘          │           └─────────────┐
+              │                       │                         │
+              ▼                       ▼                         ▼
+    ┌─────────────────┐   ┌────────────────────┐   ┌──────────────────────┐
+    │   chat_llm      │   │  rag_processing    │   │  feature_services    │
+    │  • Call LLM API │   │  • Upload docs     │   │  • PPT generation    │
+    │  • Generate ans │   │  • Create vectors  │   │  • Quiz creation     │
+    │  • Store in PG  │   │  • Store PgVector  │   │  • Notebook Q&A      │
+    └────┬─────────┬──┘   └─────────┬──────────┘   └──────────┬───────────┘
+         │         │                │                          │
+         │         │                ▼                          │
+         │         │     ┌────────────────────┐               │
+         │         │     │  rag_answer_gen    │               │
+         │         │     │  • Vector search   │               │
+         │         │     │  • LLM + context   │               │
+         │         │     │  • Return result   │               │
+         │         │     └────┬──────────┬────┘               │
+         │         │          │          │                    │
+         │         └──────────┘          │                    │
+         │                               │                    │
+         │                               │                    ▼
+         │                               │         ┌────────────────────┐
+         │                               │         │ artifact_generation│
+         │                               │         │  • Generate PPT    │
+         │                               │         │  • Create quiz     │
+         │                               │         │  • Store metadata  │
+         │                               │         └──────────┬─────────┘
+         │                               │                    │
+         ▼                               ▼                    │
+    ┌────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────┐
+│   feedback_correction       │
+│  • User provides correction │
+│  • Store in corrections tbl │◄───────┐ CORRECTION LOOP
+│  • Update feedback_log      │        │ (Apply & regenerate)
+└──────────┬─────────┬────────┘        │
+           │         │                 │
+           │         └─────────────────┘
+           │         (loop back to chat_llm)
+           │
+           ▼
+┌─────────────────────────────┐
+│    corrected_output         │
+│  • Apply correction         │
+│  • Update state             │
+│  • Persist to PostgreSQL    │
+└──┬──────────────────────┬───┘
+   │                      │
+   │                      └──────────────┐
+   │                                     │
+   │                                     ▼
+   │                          ┌────────────────────┐
+   │                          │   model_switch     │
+   │                          │  • Switch AI model │
+   │                          │  • Log switch      │
+   │                          │  • Update session  │
+   │                          └─────────┬──────────┘
+   │                                    │
+   │                                    │ MODEL SWITCH LOOP
+   │                                    │ (Route to model_selector)
+   │                                    │
+   │                                    ▼
+   │                          ┌────────────────────┐
+   │                          │  model_selector    │◄─────┐
+   │                          └────────────────────┘      │
+   │                                                       │
+   └───────────────────────────────────┐                  │
+                                       │                  │
+                                       ▼                  │
+                            ┌────────────────────┐        │
+                            │  output_persist    │        │
+                            │  • Save to PG      │        │
+                            │  • Update history  │        │
+                            │  • Commit txn      │        │
+                            └─────┬──────────┬───┘        │
+                                  │          │            │
+                 CONVERSATION     │          │ SESSION    │
+                 LOOP             │          │ END        │
+                 (Continue)       │          │            │
+                                  ▼          ▼            │
+                        ┌────────────────┐  ╔═══════╗    │
+                        │ input_session  │  ║  END  ║    │
+                        └────────────────┘  ╚═══════╝    │
+                                  │                       │
+                                  └───────────────────────┘
+                                  (User continues in session)
+
+
+{
+    # Session Management
+    "session_id": UUID,
+    "user_id": UUID,
+    "timestamp": datetime,
+    
+    # Model & Routing
+    "selected_model": "groq" | "gemini" | "perplexity",
+    "current_mode": "chat" | "ppt" | "quiz" | "notebook" | "video",
+    
+    # Conversation Data
+    "conversation_history": [{"role": str, "content": str, "timestamp": datetime}],
+    "current_query": str,
+    "llm_responses": [str],
+    
+    # RAG & Documents   
+    "uploaded_files": [File],
+    "rag_context": [{"content": str, "similarity": float, "doc_id": UUID}],
+    "vector_search_results": [{"chunk": str, "embedding": vector, "metadata": dict}],
+    
+    # Feedback & Corrections
+    "corrections": {query_hash: corrected_answer},
+    "feedback_log": [{"query": str, "options": list, "selected": str, "timestamp": datetime}],
+    
+    # Artifacts
+    "generation_artifacts": {"type": str, "path": str, "metadata": dict},
+    
+    # Control Flow
+    "user_action": "satisfied" | "corrects" | "switch_model" | "upload_docs",
+    "loop_trigger": bool,
+    "session_active": bool
+}
+
+DETAILED DIAGRAM
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                     PERSISTENT STORAGE LAYER (PostgreSQL)                    │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────────────┐    │
+│  │ Chat History    │  │ Feedback/       │  │ Documents & Embeddings   │    │
+│  │ Table           │  │ Correction      │  │ Table (PgVector)         │    │
+│  │ (sessions,      │  │ Table           │  │ (vector embeddings,      │    │
+│  │  messages,      │  │ (user overrides,│  │  document chunks,        │    │
+│  │  timestamps)    │  │  preferences)   │  │  metadata)               │    │
+│  └────────┬────────┘  └────────┬────────┘  └──────┬───────────────────┘    │
+└───────────┼────────────────────┼───────────────────┼────────────────────────┘
+            │                    │                   │
+            └────────────────────┼───────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              STATE OBJECT                                    │
+│  {                                                                           │
+│    session_id: UUID,                                                         │
+│    user_id: UUID,                                                            │
+│    conversation_history: List[{role, content, timestamp}],                  │
+│    current_query: str,                                                       │
+│    uploaded_files: List[File],                                               │
+│    selected_model: str,  # "groq", "gemini", "perplexity"                   │
+│    llm_responses: List[str],  # Multiple candidate answers                  │
+│    rag_context: List[{content, similarity_score, doc_id}],                  │
+│    corrections: Dict[query_hash, corrected_answer],                          │
+│    feedback_log: List[{query, options, selected, timestamp}],               │
+│    current_mode: str,  # "chat", "ppt", "quiz", "notebook", "video"         │
+│    generation_artifacts: Dict,  # PPT/Quiz/Video outputs                    │
+│    vector_search_results: List[{chunk, embedding, metadata}],               │
+│    user_action: str,  # "satisfied", "corrects", "switch_model"             │
+│    loop_trigger: bool                                                        │
+│  }                                                                           │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                                    ▼
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                       NODE 1: INPUT & SESSION                             ║
+║                    (Load session, history, corrections)                   ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  📝 Scenario: User says "hi" and asks about roses                         ║
+║                                                                           ║
+║  📋 Actions:                                                             ║
+║    • Check if session_id exists, create if new                           ║
+║    • Load session from PostgreSQL sessions table                         ║
+║    • Query chat_history table for conversation context                   ║
+║    • Load persistent memory (corrections from feedback table)            ║
+║    • Load previous model preference (default: Groq)                      ║
+║    • Initialize state object with all data                              ║
+║    • Set current_mode based on query type detection                      ║
+║                                                                           ║
+║  🗄️  PostgreSQL Operations:                                              ║
+║    [SELECT] sessions WHERE session_id = ?                                ║
+║    [SELECT] chat_history WHERE session_id = ? ORDER BY timestamp DESC    ║
+║    [SELECT] corrections WHERE user_id = ? AND applied = FALSE            ║
+║    [SELECT] feedback_log WHERE session_id = ? ORDER BY timestamp DESC    ║
+║    [INSERT] INTO sessions IF NOT EXISTS (session_id, user_id, created)   ║
+║                                                                           ║
+║  📤 Output State:                                                        ║
+║    • state.conversation_history = [User question about roses]            ║
+║    • state.selected_model = "groq" (from previous session)               ║
+║    • state.corrections = {...previous overrides...}                      ║
+║    • state.current_mode = "chat"                                         ║
+║    • state.session_active = True                                         ║
+║                                                                           ║
+╚════════════════════════════════════╤══════════════════════════════════════╝
+                                     │
+                                     ▼
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                    NODE 2: MODEL SELECTOR & DISPATCHER                    ║
+║                      (Route to appropriate service)                       ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  📝 Scenario: Query analyzed, model selected, routing decision made       ║
+║                                                                           ║
+║  📋 Actions:                                                             ║
+║    • Analyze query type (chat/RAG/PPT/quiz/notebook/video)               ║
+║    • Check for documents in state.uploaded_files                         ║
+║    • Select LLM from: Groq, Gemini, Perplexity                           ║
+║    • Update state.selected_model                                         ║
+║    • Determine routing path based on query analysis                      ║
+║                                                                           ║
+║  🗄️  PostgreSQL Operations:                                              ║
+║    [SELECT] model_preferences WHERE user_id = ?                          ║
+║    [UPDATE] sessions SET current_model = ? WHERE session_id = ?          ║
+║                                                                           ║
+║  🔀 Conditional Routing Edges:                                           ║
+║    IF mode == "chat"  AND has_documents == False                         ║
+║       → Edge to NODE 3 (Chat LLM) [chat_llm_path]                        ║
+║                                                                           ║
+║    IF has_documents == True AND user_wants_rag == True                   ║
+║       → Edge to NODE 7 (RAG Processing) [rag_path]                       ║
+║                                                                           ║
+║    IF mode in ["ppt", "quiz", "notebook", "video"]                       ║
+║       → Edge to NODE 8 (Feature Services) [feature_path]                 ║
+║                                                                           ║
+║  📤 Output State:                                                        ║
+║    • state.current_route = "chat_llm_path"                               ║
+║    • state.selected_model = "perplexity" (if user switched)              ║
+║    • state.routing_decision = {...metadata...}                           ║
+║                                                                           ║
+╚─────────────┬──────────────┬──────────────────┬──────────────────────────╝
+              │              │                  │
+        [Chat Path]   [RAG Path]        [Feature Path]
+              │              │                  │
+              ▼              ▼                  ▼
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                      NODE 3: CHAT LLM GENERATION                          ║
+║                     (Generate response using LLM API)                     ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  📝 Scenario: LLM generates response about roses                          ║
+║                                                                           ║
+║  📋 Actions:                                                             ║
+║    • Build prompt with conversation history                              ║
+║    • Include previous corrections in system context                      ║
+║    • Call selected LLM API (Groq/Gemini/Perplexity client)               ║
+║    • Generate response (single or multiple completions)                  ║
+║    • Store response in state.llm_responses                               ║
+║    • Add to conversation_history                                         ║
+║                                                                           ║
+║  🔑 Key Features:                                                        ║
+║    • Multi-model support via clients.generate()                          ║
+║    • Maintains conversation context (last N messages)                    ║
+║    • Applies user corrections as system prompt                           ║
+║    • Fallback model support if primary fails                             ║
+║                                                                           ║
+║  🗄️  PostgreSQL Operations:                                              ║
+║    [INSERT] INTO chat_history (session_id, role, content, timestamp)     ║
+║             VALUES (?, 'assistant', response_text, NOW())                ║
+║    [SELECT] chat_history WHERE session_id = ? LIMIT 20 (context window)  ║
+║    [SELECT] corrections WHERE query_hash SIMILAR TO current_query        ║
+║                                                                           ║
+║  ⏱️  Async Support:                                                      ║
+║    • Uses async client calls for non-blocking I/O                        ║
+║    • Concurrent API requests to multiple models if needed                ║
+║                                                                           ║
+║  📤 Output State:                                                        ║
+║    • state.llm_responses = ["Here are types of roses..."]                ║
+║    • state.conversation_history += [{"role": "assistant", "content"...}] ║
+║    • state.current_response = response_text                              ║
+║                                                                           ║
+║  🔀 Edge Conditions:                                                     ║
+║    IF user_satisfied == True   → NODE 11 (Output & Persist)              ║
+║    IF user_corrects == True    → NODE 4 (Feedback/Correction)            ║
+║    IF switch_model == True     → NODE 6 (Model Switch)                   ║
+║    IF user_uploads_docs == True → NODE 7 (RAG Processing)                ║
+║                                                                           ║
+╚────────────┬──────────────────────────────────────────────────────────────╝
+             │
+        [User Action]
+             │
+    ┌────────┴────────┐
+    │                 │
+    ▼                 ▼
+[Satisfied]   [Corrects Answer]
+    │                 │
+    │                 ▼
+    │         ╔═══════════════════════════════════════════════════════════╗
+    │         ║           NODE 4: FEEDBACK/CORRECTION HANDLER            ║
+    │         ║         (User provides correction to LLM answer)         ║
+    │         ╠═══════════════════════════════════════════════════════════╣
+    │         ║                                                          ║
+    │         ║  📝 Scenario: User says "You gave answer on roses,       ║
+    │         ║  but I want to know about blue roses which don't exist  ║
+    │         ║  naturally"                                             ║
+    │         ║                                                          ║
+    │         ║  📋 Actions:                                            ║
+    │         ║    • Receive user correction                            ║
+    │         ║    • Parse correction type (factual/style/preference)    ║
+    │         ║    • Hash original query for retrieval                  ║
+    │         ║    • Store correction in database                       ║
+    │         ║    • Log feedback in feedback_log table                 ║
+    │         ║    • Mark correction as unapplied initially             ║
+    │         ║                                                          ║
+    │         ║  🗄️  PostgreSQL Operations:                              ║
+    │         ║    [INSERT] INTO corrections                            ║
+    │         ║             (user_id, session_id, query_hash,           ║
+    │         ║              original_answer, corrected_answer, applied) ║
+    │         ║             VALUES (?, ?, ?, ?, ?, FALSE)               ║
+    │         ║    [INSERT] INTO feedback_log                           ║
+    │         ║             (session_id, query, feedback_type, details) ║
+    │         ║             VALUES (?, ?, 'correction', JSON)           ║
+    │         ║    [SELECT] corrections WHERE user_id = ? FOR CONTEXT   ║
+    │         ║                                                          ║
+    │         ║  📤 Output State:                                       ║
+    │         ║    • state.corrections += {query_hash: corrected_answer}║
+    │         ║    • state.feedback_log += {feedback_entry}             ║
+    │         ║    • state.user_action = "corrects"                     ║
+    │         ║    • state.loop_trigger = True                          ║
+    │         ║                                                          ║
+    │         ║  🔄 LOOP EDGE:                                          ║
+    │         ║    → NODE 3 (Chat LLM) with correction context          ║
+    │         ║    [Regenerate with correction knowledge]               ║
+    │         ║                                                          ║
+    │         ╚────────────────────┬─────────────────────────────────────╝
+    │                              │
+    │                    [Correction Applied]
+    │                              │
+    │                              ▼
+    │         ╔═══════════════════════════════════════════════════════════╗
+    │         ║                 NODE 5: CORRECTED OUTPUT HANDLER          ║
+    │         ║         (Process and apply correction, update state)      ║
+    │         ╠═══════════════════════════════════════════════════════════╣
+    │         ║                                                          ║
+    │         ║  📝 Scenario: Correction applied, new answer generated   ║
+    │         ║                                                          ║
+    │         ║  📋 Actions:                                            ║
+    │         ║    • Confirm correction was applied                     ║
+    │         ║    • Mark correction as applied in database             ║
+    │         ║    • Update session state                               ║
+    │         ║    • Add corrected exchange to history                  ║
+    │         ║    • Prepare state for next user action                 ║
+    │         ║                                                          ║
+    │         ║  🗄️  PostgreSQL Operations:                              ║
+    │         ║    [UPDATE] corrections SET applied = TRUE               ║
+    │         ║             WHERE correction_id = ?                      ║
+    │         ║    [INSERT] INTO chat_history                           ║
+    │         ║             VALUES (?, 'system', 'correction applied')   ║
+    │         ║                                                          ║
+    │         ║  📤 Output State:                                       ║
+    │         ║    • state.corrected_response = new_llm_answer           ║
+    │         ║    • state.last_correction_id = correction_id            ║
+    │         ║    • state.user_action = "corrected_satisfied"           ║
+    │         ║                                                          ║
+    │         ║  🔀 Edge Conditions:                                    ║
+    │         ║    IF switch_model == True → NODE 6 (Model Switch)       ║
+    │         ║    IF upload_docs == True  → NODE 7 (RAG Processing)     ║
+    │         ║    IF continue == True     → NODE 11 (Output)            ║
+    │         ║                                                          ║
+    │         ╚────────────────────┬─────────────────────────────────────╝
+    │                              │
+    │                    [Next Action]
+    │                              │
+    │         ┌────────────────────┼───────────────────┐
+    │         │                    │                   │
+    │         │         [Switch Model]       [Continue/Output]
+    │         │                    │                   │
+    │         │                    ▼                   │
+    │         │         ╔═══════════════════════════╗ │
+    │         │         ║  NODE 6: MODEL SWITCHING  ║ │
+    │         │         ║  (Switch AI model/provider)║ │
+    │         │         ╠═══════════════════════════╣ │
+    │         │         ║                          ║ │
+    │         │         ║ 📝 Scenario: User wants ║ │
+    │         │         ║ deeper research with    ║ │
+    │         │         ║ different model         ║ │
+    │         │         ║                          ║ │
+    │         │         ║ 📋 Actions:             ║ │
+    │         │         ║ • Verify new model      ║ │
+    │         │         ║ • Update state model    ║ │
+    │         │         ║ • Log model switch      ║ │
+    │         │         ║ • Maintain context      ║ │
+    │         │         ║                          ║ │
+    │         │         ║ 🗄️  PostgreSQL Ops:     ║ │
+    │         │         ║ [UPDATE] sessions SET   ║ │
+    │         │         ║  current_model = ?      ║ │
+    │         │         ║ [INSERT] model_switches ║ │
+    │         │         ║                          ║ │
+    │         │         ║ 🔄 LOOP EDGE:           ║ │
+    │         │         ║ → NODE 2 (Re-route)     ║ │
+    │         │         ║                          ║ │
+    │         │         ╚────────────┬─────────────╝ │
+    │         │                      │               │
+    │         │    [Loop back with new model]       │
+    │         │                      │               │
+    │         │                      ▼               ▼
+    │         │          [NODE 2: model_selector] [Continue to NODE 11]
+    │         │                      │
+    │         └──────────────────────┘
+    │
+    └────────────────────────────────────────────────────────────────┐
+                                                                     │
+                    [From NODE 2 if RAG/Feature path]                │
+                                                                     │
+                                 ▼
+                    ┌─────────────────────────────────────┬──────────┘
+                    │                                     │
+                    ▼                                     ▼
+        ╔════════════════════════════════╗   ╔═══════════════════════════════╗
+        ║   NODE 7: RAG PROCESSING       ║   ║  NODE 8: FEATURE SERVICES     ║
+        ║  (Process docs & create vectors)║   ║  (PPT/Quiz/Notebook/Video)   ║
+        ╠════════════════════════════════╣   ╠═══════════════════════════════╣
+        ║                                ║   ║                               ║
+        ║ 📝 Scenario: User uploads 2   ║   ║ 📝 Scenario: User requests    ║
+        ║ PDF files on blue roses       ║   ║ PPT generation on roses       ║
+        ║                                ║   ║                               ║
+        ║ 📋 Actions:                   ║   ║ 📋 Actions:                   ║
+        ║ • Validate file formats       ║   ║ • Load feature-specific logic ║
+        ║ • Extract text from PDFs      ║   ║ • Prepare data context        ║
+        ║ • Chunk documents             ║   ║ • Initialize feature service  ║
+        ║ • Generate embeddings         ║   ║ • Use LLM + business logic    ║
+        ║ • Store in PgVector           ║   ║ • Generate artifact            ║
+        ║ • Create vector indices       ║   ║                               ║
+        ║                                ║   ║ 🔧 Supported Features:        ║
+        ║ 🗄️  PostgreSQL (PgVector):    ║   ║ • PPT generation              ║
+        ║ [INSERT] INTO documents       ║   ║ • Quiz creation               ║
+        ║ [INSERT] INTO document_       ║   ║ • Notebook Q&A                ║
+        ║  embeddings WITH vector       ║   ║ • Video generation (Manim)    ║
+        ║ CREATE INDEX ivfflat          ║   ║                               ║
+        ║  ON document_embeddings       ║   ║ 🗄️  PostgreSQL:               ║
+        ║                                ║   ║ [SELECT] context from history ║
+        ║ 📤 Output State:              ║   ║ [INSERT] artifact metadata    ║
+        ║ • state.rag_context loaded    ║   ║                               ║
+        ║ • state.vector_search_ready   ║   ║ 📤 Output State:              ║
+        ║                                ║   ║ • state.artifact_type set     ║
+        ║ 🔀 Edge:                      ║   ║ • state.generation_started    ║
+        ║ → NODE 9 (RAG Answer Gen)     ║   ║                               ║
+        ║                                ║   ║ 🔀 Edge:                      ║
+        ║                                ║   ║ → NODE 10 (Artifact Gen)      ║
+        ║                                ║   ║                               ║
+        ╚────────────┬───────────────────╝   ╚───────────────┬────────────────╝
+                     │                                      │
+                     ▼                                      │
+        ╔════════════════════════════════╗                 │
+        ║ NODE 9: RAG-ENHANCED GENERATION║                 │
+        ║ (Vector search + LLM response) ║                 │
+        ╠════════════════════════════════╣                 │
+        ║                                ║                 │
+        ║ 📝 Scenario: Vector search    ║                 │
+        ║ retrieves blue rose docs,     ║                 │
+        ║ LLM uses for accurate answer  ║                 │
+        ║                                ║                 │
+        ║ 📋 Actions:                   ║                 ║
+        ║ • Generate query embedding    ║                 ║
+        ║ • Perform vector similarity   ║                 ║
+        ║ • Retrieve top-K chunks       ║                 ║
+        ║ • Combine with corrections    ║                 ║
+        ║ • Call LLM with context       ║                 ║
+        ║                                ║                 ║
+        ║ 🗄️  PostgreSQL (PgVector):    ║                 ║
+        ║ [SELECT] document_embeddings  ║                 ║
+        ║  WHERE embedding <=> query    ║                 ║
+        ║  ORDER BY similarity LIMIT 5  ║                 ║
+        ║ [LEFT JOIN] corrections FOR   ║                 ║
+        ║  personalized context         ║                 ║
+        ║                                ║                 ║
+        ║ 📤 Output State:              ║                 ║
+        ║ • state.rag_context = results ║                 ║
+        ║ • state.llm_responses updated ║                 ║
+        ║                                ║                 ║
+        ║ 🔀 Edge Conditions:           ║                 ║
+        ║ IF user_likes → NODE 11       ║                 ║
+        ║ IF user_corrects → NODE 4     ║                 ║
+        ║ IF generate_artifact → NODE10 ║                 ║
+        ║                                ║                 ║
+        ╚────────────┬───────────────────╝                 │
+                     │                                      │
+                     └──────────────────┬───────────────────┘
+                                        │
+                                        ▼
+        ╔═══════════════════════════════════════════════════════════╗
+        ║            NODE 10: ARTIFACT GENERATION                   ║
+        ║     (Generate PPT/Quiz/Notebook based on context)         ║
+        ╠═══════════════════════════════════════════════════════════╣
+        ║                                                           ║
+        ║ 📝 Scenario: User says "Generate a PPT regarding          ║
+        ║ blue roses" - system creates presentation                ║
+        ║                                                           ║
+        ║ 📋 Actions:                                              ║
+        ║ • Know it has PPT generation tool available              ║
+        ║ • Access context: RAG results + conversation + history   ║
+        ║ • Call PPT service with LLM guidance                     ║
+        ║ • Generate slides with AI-written content                ║
+        ║ • Save PPT file to outputs/                              ║
+        ║ • Store metadata in PostgreSQL                           ║
+        ║                                                           ║
+        ║ 🛠️  Generation Process:                                  ║
+        ║ • Extract key points from context                        ║
+        ║ • Generate slide content via LLM                         ║
+        ║ • Apply styling and formatting                           ║
+        ║ • Create presentation structure                          ║
+        ║ • Embed images/media if needed                           ║
+        ║                                                           ║
+        ║ 🗄️  PostgreSQL Operations:                               ║
+        ║ [INSERT] INTO generated_artifacts                        ║
+        ║  (session_id, artifact_type, file_path, metadata)        ║
+        ║  VALUES (?, 'ppt', 'outputs/ppt_xxx.pptx', JSON)         ║
+        ║ [INSERT] INTO artifact_versions FOR tracking             ║
+        ║                                                           ║
+        ║ 📤 Output State:                                         ║
+        ║ • state.generation_artifacts = {ppt_file_path}           ║
+        ║ • state.artifact_ready = True                            ║
+        ║ • state.artifact_metadata = {type, path, size, ...}      ║
+        ║                                                           ║
+        ║ 🔀 Edge:                                                ║
+        ║ → NODE 11 (Output & Persist)                             ║
+        ║                                                           ║
+        ╚────────────┬─────────────────────────────────────────────╝
+                     │
+                     │
+                     └──────────────────────────────────────┐
+                                                           │
+                                                           ▼
+                        ╔═══════════════════════════════════════════════════════════╗
+                        ║              NODE 11: OUTPUT & PERSIST                    ║
+                        ║         (Save state & deliver final response)             ║
+                        ╠═══════════════════════════════════════════════════════════╣
+                        ║                                                           ║
+                        ║ 📝 Scenario: PPT generated, session complete,             ║
+                        ║ all changes persisted to PostgreSQL                      ║
+                        ║                                                           ║
+                        ║ 📋 Actions:                                              ║
+                        ║ • Finalize response content                              ║
+                        ║ • Update session status                                  ║
+                        ║ • Save all artifacts & metadata                          ║
+                        ║ • Commit all pending transactions                        ║
+                        ║ • Cleanup temporary state                                ║
+                        ║ • Prepare for next interaction                           ║
+                        ║                                                           ║
+                        ║ 🗄️  PostgreSQL Operations (COMMIT BLOCK):               ║
+                        ║ [INSERT] INTO chat_history (final response)              ║
+                        ║ [UPDATE] sessions SET updated_at = NOW()                 ║
+                        ║ [INSERT] INTO artifact_versions (tracking)               ║
+                        ║ [INSERT] INTO session_logs (interaction complete)        ║
+                        ║ [UPDATE] corrections SET user_validated = True           ║
+                        ║ BEGIN TRANSACTION / COMMIT (atomic operation)            ║
+                        ║                                                           ║
+                        ║ 📤 Output to User:                                       ║
+                        ║ • Final answer/response                                  ║
+                        ║ • Download link for PPT/artifacts                        ║
+                        ║ • Session summary                                        ║
+                        ║ • Related suggestions                                    ║
+                        ║                                                           ║
+                        ║ 📊 State After Persist:                                  ║
+                        ║ • state.session_active = True (for continuation)          ║
+                        ║ • state.last_action_timestamp = NOW()                    ║
+                        ║ • state.persistence_complete = True                      ║
+                        ║                                                           ║
+                        ║ 🔀 Edge Conditions:                                     ║
+                        ║ IF continue_conversation == True                         ║
+                        ║    → NODE 1 (Input Session) [CONVERSATION LOOP]           ║
+                        ║ IF session_end == True                                   ║
+                        ║    → END (Close session)                                 ║
+                        ║                                                           ║
+                        ╚───────────────┬──────────────────────────────────────────╝
+                                        │
+                                        ▼
+                        ╔═══════════════════════════════════════════════════════════╗
+                        ║                   LOOP DECISION POINT                     ║
+                        ╠═══════════════════════════════════════════════════════════╣
+                        ║                                                           ║
+                        ║ 🔀 User Can Choose One of Three Paths:                   ║
+                        ║                                                           ║
+                        ║ Path 1: CONVERSATION LOOP                                ║
+                        ║         ↓                                                 ║
+                        ║ User: "Can you also tell me about other exotic flowers?" ║
+                        ║         ↓                                                 ║
+                        ║ → NODE 1 (Input Session)                                 ║
+                        ║   [New query loaded with all previous context]           ║
+                        ║   [All corrections/feedback still in state]              ║
+                        ║   [Conversation history extended]                        ║
+                        ║                                                           ║
+                        ║ Path 2: SESSION END                                      ║
+                        ║         ↓                                                 ║
+                        ║ User: "That's all, thank you!"                           ║
+                        ║         ↓                                                 ║
+                        ║ → END (Session closed, ready for new session)            ║
+                        ║   [All data persisted in PostgreSQL]                     ║
+                        ║   [Available for user to resume later]                   ║
+                        ║                                                           ║
+                        ║ Path 3: FEEDBACK/CORRECTION OPPORTUNITY                  ║
+                        ║         ↓                                                 ║
+                        ║ User: "Actually, the information was wrong..."           ║
+                        ║         ↓                                                 ║
+                        ║ → NODE 4 (Feedback Correction)                           ║
+                        ║   [Correction stored for future accuracy]                ║
+                        ║   [Loop back to regenerate]                              ║
+                        ║                                                           ║
+                        ╚═══════════════════════════════════════════════════════════╝
+                                        │
+                        ┌───────────────┼───────────────┐
+                        │               │               │
+                    Path 1          Path 2          Path 3
+                        │               │               │
+                        ▼               ▼               ▼
+                    ┌──────────┐   ╔═══════╗   ┌────────────────┐
+                    │NODE 1    │   ║ END   ║   │NODE 4          │
+                    │(continue)│   ╚═══════╝   │(Correction)    │
+                    └─────┬────┘               └──────┬─────────┘
+                          │                          │
+                          │                          │ (Loop back)
+                          │                          │
+                          ▼                          ▼
+                    ┌──────────────────────────────────────────┐
+                    │ PERSISTENT STATE READY FOR NEXT QUERY    │
+                    │                                          │
+                    │ ✓ All corrections stored                 │
+                    │ ✓ Feedback logged                        │
+                    │ ✓ Vector embeddings updated              │
+                    │ ✓ Chat history extended                  │
+                    │ ✓ Artifacts generated                    │
+                    │ ✓ Session maintained                     │
+                    │                                          │
+                    └──────────────────────────────────────────┘
+
+
+================================================================================
+POSTGRESQL TABLES OVERVIEW
+TABLE: sessions
+├─ session_id (UUID, PK)
+├─ user_id (UUID, FK)
+├─ current_model (VARCHAR): groq, gemini, perplexity
+├─ created_at, updated_at (TIMESTAMP)
+└─ metadata (JSONB): session preferences, flags
+
+TABLE: chat_history
+├─ message_id (BIGSERIAL, PK)
+├─ session_id (UUID, FK)
+├─ role (VARCHAR): 'user', 'assistant', 'system'
+├─ content (TEXT): message content
+├─ timestamp (TIMESTAMP)
+├─ model_used (VARCHAR)
+├─ metadata (JSONB): tokens, cost, latency, etc.
+└─ [INDEX] on (session_id, timestamp)
+
+TABLE: corrections
+├─ correction_id (BIGSERIAL, PK)
+├─ user_id (UUID)
+├─ session_id (UUID, FK)
+├─ query_hash (VARCHAR): hash of original query
+├─ original_answer (TEXT)
+├─ corrected_answer (TEXT): user's correction
+├─ applied (BOOLEAN): was correction used?
+├─ timestamp (TIMESTAMP)
+├─ metadata (JSONB): correction type, confidence
+└─ [INDEX] on (user_id, query_hash)
+
+TABLE: feedback_log
+├─ feedback_id (BIGSERIAL, PK)
+├─ session_id (UUID, FK)
+├─ query (TEXT)
+├─ feedback_type (VARCHAR): 'correction', 'selection', 'rating'
+├─ options (JSONB): if user chose from multiple options
+├─ selected_option (TEXT): which option was selected
+├─ timestamp (TIMESTAMP)
+└─ metadata (JSONB): rating, confidence, reasoning
+
+TABLE: documents (RAG)
+├─ doc_id (UUID, PK)
+├─ user_id (UUID)
+├─ session_id (UUID, FK)
+├─ filename (VARCHAR)
+├─ content (TEXT): full extracted text
+├─ file_path (VARCHAR): storage location
+├─ upload_time (TIMESTAMP)
+└─ metadata (JSONB): file_size, format, hash
+
+TABLE: document_embeddings (PgVector)
+├─ embedding_id (BIGSERIAL, PK)
+├─ doc_id (UUID, FK)
+├─ chunk_id (INTEGER): chunk number in document
+├─ chunk_text (TEXT)
+├─ embedding (vector): 1536-dim vector (PgVector type)
+├─ metadata (JSONB): position, page_num, context
+├─ created_at (TIMESTAMP)
+├─ [INDEX] ivfflat on embedding for vector similarity search
+└─ [INDEX] on doc_id for retrieval
+
+TABLE: generated_artifacts
+├─ artifact_id (UUID, PK)
+├─ session_id (UUID, FK)
+├─ artifact_type (VARCHAR): 'ppt', 'quiz', 'video', 'notebook'
+├─ file_path (VARCHAR)
+├─ metadata (JSONB): size, duration, pages, etc.
+├─ generation_time (TIMESTAMP)
+├─ model_used (VARCHAR)
+└─ [INDEX] on session_id
+
+TABLE: model_switches
+├─ switch_id (BIGSERIAL, PK)
+├─ session_id (UUID, FK)
+├─ from_model (VARCHAR)
+├─ to_model (VARCHAR)
+├─ reason (TEXT): why user switched
+└─ timestamp (TIMESTAMP)
+
+================================================================================

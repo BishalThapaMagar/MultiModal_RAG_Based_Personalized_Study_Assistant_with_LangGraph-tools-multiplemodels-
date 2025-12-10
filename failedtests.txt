@@ -1,0 +1,39 @@
+Model is either automaticallys selected or manually selected only when said in chat.
+In future I need the model selection to be sent form frontend by user. So, keep that as open option. Ignore this for now
+
+2025-12-09 23:33:22 - httpx - INFO - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent "HTTP/1.1 429 Too Many Requests"   
+  -> Tool Executed!
+  -> Tool Executed!
+  -> Tool Executed!
+  -> Tool Executed!
+  -> Tool Executed!
+  -> Tool Executed!
+Bot Output: Error calling LLM: Error calling model 'gemini-2.5-flash' (RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceed...
+✔ Tool Call Verified
+
+=== Running Test: Normal Chat ===
+
+User Input [1]: What is the capital of Japan?
+--- Node: input_session (Session: 88f056f8-a855-46fe-99d9-87810f81045c) ---
+--- Node: model_selector ---
+2025-12-09 23:33:23 - httpx - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+--- Model Selected: perplexity ---
+--- Node: chat_llm ---
+Bot Output: Perplexity/Other model response placeholder (No Tools)...
+✔ Verified No Tool Call
+
+All Phase 3 Tests Completed.
+
+Tools that require GoggleGeminiKey are not working due to exhaused api
+Tools that require file input from frontend are to be further enhanced as frontend need
+
+RAG vector generation needs geminiapikey/ or better embedding model. ask Anup
+
+Seems I didn't install Pgvector extension while installing pgadmin4 and later adding that is suicide.
+So, switching to chromadb. 
+Don't know if the connection variable taken from .env of postgresql is working for chromadb
+Don't know about chroma db so don't know if it's implemented well in database.py
+
+Run python ingestion.py again. (Verify it says "Ingestion Complete").
+Run python test_phase5.py again.
+

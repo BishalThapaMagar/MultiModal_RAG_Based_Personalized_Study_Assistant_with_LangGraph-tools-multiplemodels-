@@ -1,0 +1,12 @@
+pydantic_ai
+manim
+moviepy
+pydantic
+nest_asyncio
+streamlit
+google-cloud-texttospeech
+pydub
+Pillow
+python-dotenv
+gtts
+requests
