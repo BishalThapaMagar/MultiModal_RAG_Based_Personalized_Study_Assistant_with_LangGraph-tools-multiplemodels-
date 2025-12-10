@@ -2,7 +2,7 @@
 
 This project is an advanced conversational AI agent built with **LangGraph**, designing for robustness, persistence, and multi-modal capabilities. It orchestrates multiple LLMs (Groq, Gemini, Perplexity) and integrates various tools for education and content creation.
 
-## 🌟 Key Features
+## Key Features
 
 *   **langGraph Architecture**: A cyclic state-based graph managing the conversation flow, replacing linear chains.
 *   **Persistent Memory**: Uses **PostgreSQL** to store session history and user corrections, ensuring continuity across server restarts.
@@ -26,7 +26,7 @@ The system is defined in `graph.py` as a `StateGraph`:
 4.  **Chat LLM**: Invokes the selected model. If the model requests a tool, the **ToolNode** executes it and loops back.
 5.  **Persistence**: All interactions are saved to `ai_chat_db`.
 
-## 🚀 Setup & Installation
+## Setup & Installation
 
 ### 1. Prerequisites
 *   Python 3.10+
@@ -61,7 +61,7 @@ python ingestion.py
 ```
 This populates the local `chroma_db` vector store.
 
-## 🏃 Usage
+## Usage
 
 ### Run the CLI Chatbot
 ```bash
@@ -73,7 +73,7 @@ python main_langgraph.py
 *   **"create a presentation on [topic]"**: Triggers the PPT tool.
 *   **"correction: [text]"**: Updates the system's knowledge about a previous error.
 
-## 🧪 Testing
+## Testing
 
 Run specific test phases to verify components:
 *   `python test_phase4.py`: Verify Database Persistence.
