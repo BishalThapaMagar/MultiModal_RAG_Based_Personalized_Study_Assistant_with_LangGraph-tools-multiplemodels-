@@ -1,4 +1,5 @@
 # MajorProject_aiCore (LangGraph Edition)
+# MultiModal RAG Based Personalized Study Assistant with LangGraph, tools and multi-models
 
 This project is an advanced conversational AI agent built with **LangGraph**, designing for robustness, persistence, and multi-modal capabilities. It orchestrates multiple LLMs (Groq, Gemini, Perplexity) and integrates various tools for education and content creation.
 
